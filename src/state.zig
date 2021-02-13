@@ -8,8 +8,8 @@ const io = std.io;
 
 const Endian = std.builtin.Endian;
 
-const float_t = f128;
-const int_t = u128;
+const float_t = f64;
+const int_t = u64;
 const size_t = usize;
 
 const FixedBufferReader = io.FixedBufferStream([]const u8).Reader;
@@ -28,7 +28,7 @@ pub const State = struct {
     number_type: NumberFormat,
 
     pub fn format(self: State, comptime str: []const u8, options: fmt.FormatOptions, writer: anytype) !void {
-        try writer.print("Lua {x}, {} Endian, {d}-bit Integers, {d}-bit Sizes, {d}-bit Instructions, {d}-bit {} Numbers", .{
+        try writer.print("Lua {x}, {s} Endian, {d}-bit Integers, {d}-bit Sizes, {d}-bit Instructions, {d}-bit {s} Numbers", .{
             self.version,           @tagName(self.endian),      self.sizeof_int * 8, self.sizeof_size * 8, self.sizeof_instruction * 8,
             self.sizeof_number * 8, @tagName(self.number_type),
         });
@@ -156,7 +156,7 @@ pub const State = struct {
     }
 };
 
-pub const NumberFormat = @TagType(LuaNumber);
+pub const NumberFormat = std.meta.TagType(LuaNumber);
 pub const LuaNumber = union(enum) {
     floating: float_t,
     integer: int_t,
@@ -234,7 +234,7 @@ pub const Instruction = union(enum) {
     pub fn format(self: Instruction, comptime str: []const u8, options: fmt.FormatOptions, writer: anytype) !void {
         switch (self) {
             .ABC => |inst| {
-                try writer.print("{: <9} ", .{@tagName(inst.opcode)});
+                try writer.print("{s: <9} ", .{@tagName(inst.opcode)});
 
                 switch (inst.opcode) {
                     .CLOSE => {
@@ -256,10 +256,10 @@ pub const Instruction = union(enum) {
                 }
             },
             .ABx => |inst| {
-                try writer.print("{: <9} {d}, {d}", .{ @tagName(inst.opcode), inst.A, inst.Bx });
+                try writer.print("{s: <9} {d}, {d}", .{ @tagName(inst.opcode), inst.A, inst.Bx });
             },
             .AsBx => |inst| {
-                try writer.print("{: <9} {d}, {d}", .{ @tagName(inst.opcode), inst.A, inst.sBx });
+                try writer.print("{s: <9} {d}, {d}", .{ @tagName(inst.opcode), inst.A, inst.sBx });
             },
         }
     }
@@ -322,27 +322,31 @@ pub const Chunk = struct {
     instructions: []const Instruction,
     constants: []const Constant,
     prototypes: []const *Chunk,
-    debug: ?DebugInfo,
+    debug: DebugInfo,
 
     const DecodeError = mem.Allocator.Error || FixedBufferReader.Error || error{ InvalidConstantType, EndOfStream };
 
     pub fn format(self: Chunk, comptime str: []const u8, options: fmt.FormatOptions, writer: anytype) @TypeOf(writer).Error!void {
-        try writer.print("\nChunk[{}]: {} on lines {} to {}, {} upvalues, {} arguments, {b:0>3} vararg\n", .{
+        try writer.print("\nChunk[{}]: {s} on lines {} to {}, {} upvalues, {} arguments, {b:0>3} vararg\n", .{
             self.stack_size, self.name, self.first_line, self.last_line, self.n_upvalues, self.n_arguments, self.vararg,
         });
 
         try writer.print("Constants[{}]: \n", .{self.constants.len});
         for (self.constants) |constant, i| {
-            try writer.print("  {} ({}): ", .{ i, @tagName(constant) });
+            try writer.print("  {} ({s}): ", .{ i, @tagName(constant) });
             switch (constant) {
                 .nil => try writer.writeAll("nil"),
                 .boolean => |data| try writer.print("{}", .{data}),
                 .number => |data| try writer.print("{}", .{data}),
                 .string => |data| {
                     if (data.len > 32) {
-                        try writer.print("\"{Z}...\"", .{data[0..32]});
+                        try writer.print("\"{}...\"", .{
+                            std.zig.fmtEscapes(data[0..32]),
+                        });
                     } else {
-                        try writer.print("\"{Z}\"", .{data[0 .. data.len - 1]});
+                        try writer.print("\"{}\"", .{
+                            std.zig.fmtEscapes(data[0 .. data.len - 1]),
+                        });
                     }
                 },
             }
@@ -360,23 +364,21 @@ pub const Chunk = struct {
             try proto.format(str, options, writer);
         }
 
-        if (self.debug) |data| {
-            try writer.print("Source Lines[{}]: ", .{data.lines.len});
-            for (data.lines) |line| {
-                try writer.print("{}, ", .{line});
-            }
+        try writer.print("Source Lines[{}]: ", .{self.debug.lines.len});
+        for (self.debug.lines) |line| {
+            try writer.print("{}, ", .{line});
+        }
 
-            try writer.writeAll("\n");
+        try writer.writeAll("\n");
 
-            try writer.print("Locals[{}]: \n", .{data.locals.len});
-            for (data.locals) |local, i| {
-                try writer.print("  {}: '{}' from {} to {}\n", .{ i, local.name, local.start_pc, local.end_pc });
-            }
-            
-            try writer.print("Upvalues[{}]: \n", .{data.upvalues.len});
-            for (data.upvalues) |upvalue, i| {
-                try writer.print("  {}: '{}'", .{ i, upvalue.name });
-            }
+        try writer.print("Locals[{}]: \n", .{self.debug.locals.len});
+        for (self.debug.locals) |local, i| {
+            try writer.print("  {}: '{s}' from {} to {}\n", .{ i, local.name, local.start_pc, local.end_pc });
+        }
+
+        try writer.print("Upvalues[{}]: \n", .{self.debug.upvalues.len});
+        for (self.debug.upvalues) |upvalue, i| {
+            try writer.print("  {}: '{s}'", .{ i, upvalue.name });
         }
     }
 
@@ -399,7 +401,7 @@ pub const Chunk = struct {
         chunk.stack_size = try reader.readInt(u8, state.endian);
 
         {
-            const list_size = try state.readSize(reader);
+            const list_size = try state.readInteger(reader);
 
             var instructions = try allocator.alloc(Instruction, list_size);
 
@@ -414,7 +416,7 @@ pub const Chunk = struct {
         }
 
         {
-            const list_size = try state.readSize(reader);
+            const list_size = try state.readInteger(reader);
 
             var constants = try allocator.alloc(Constant, list_size);
 
@@ -449,7 +451,7 @@ pub const Chunk = struct {
         }
 
         {
-            const list_size = try state.readSize(reader);
+            const list_size = try state.readInteger(reader);
 
             var prototypes = try allocator.alloc(*Chunk, list_size);
 
@@ -464,20 +466,20 @@ pub const Chunk = struct {
         var debug_info: DebugInfo = undefined;
 
         {
-            const list_size = try state.readSize(reader);
+            const list_size = try state.readInteger(reader);
 
             var lineinfo = try allocator.alloc(size_t, list_size);
 
             var i: usize = 0;
             while (i < list_size) : (i += 1) {
-                lineinfo[i] = try state.readSize(reader);
+                lineinfo[i] = try state.readInteger(reader);
             }
 
             debug_info.lines = lineinfo;
         }
 
         {
-            const list_size = try state.readSize(reader);
+            const list_size = try state.readInteger(reader);
 
             var locals = try allocator.alloc(DebugLocal, list_size);
 
@@ -485,8 +487,8 @@ pub const Chunk = struct {
             while (i < list_size) : (i += 1) {
                 locals[i] = .{
                     .name = try state.readString(allocator, reader),
-                    .start_pc = try state.readSize(reader),
-                    .end_pc = try state.readSize(reader),
+                    .start_pc = try state.readInteger(reader),
+                    .end_pc = try state.readInteger(reader),
                 };
             }
 
@@ -494,7 +496,7 @@ pub const Chunk = struct {
         }
 
         {
-            const list_size = try state.readSize(reader);
+            const list_size = try state.readInteger(reader);
 
             var upvalues = try allocator.alloc(DebugUpvalue, list_size);
 
@@ -526,12 +528,24 @@ pub const Chunk = struct {
         }
 
         for (self.prototypes) |proto| {
-            // proto.deinit();
+            proto.deinit();
+        }
+
+        for (self.debug.locals) |local| {
+            self.allocator.free(local.name);
+        }
+
+        for (self.debug.upvalues) |upvalue| {
+            self.allocator.free(upvalue.name);
         }
 
         self.allocator.free(self.instructions);
         self.allocator.free(self.constants);
         self.allocator.free(self.prototypes);
+
+        self.allocator.free(self.debug.lines);
+        self.allocator.free(self.debug.locals);
+        self.allocator.free(self.debug.upvalues);
 
         self.allocator.destroy(self);
     }
@@ -552,20 +566,3 @@ pub const DebugInfo = struct {
     locals: []DebugLocal,
     upvalues: []DebugUpvalue,
 };
-
-pub fn run() !void {
-    const data: []const u8 = try std.fs.cwd().readFileAlloc(std.testing.allocator, "luac.out", 4 * 1024 * 1024);
-    defer std.testing.allocator.free(data);
-
-    const state = try State.init(data);
-
-    std.debug.print("{}\n", .{state});
-
-    var stream = io.fixedBufferStream(data[12..]);
-    const reader = stream.reader();
-
-    var root = try Chunk.decode(std.testing.allocator, state, reader);
-    defer root.deinit();
-
-    std.debug.print("{}\n", .{root});
-}
